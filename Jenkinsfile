@@ -53,19 +53,34 @@ pipeline {
         stage('CODE ANALYSIS with SONARQUBE') {
 
             environment {
-                scannerHome = tool 'mysonarscanner4'
-            }
+                scannerHome = tool 'pipeline {
+    agent any
 
+    environment {
+        // Define your environment variables here
+        scannerHome = tool name: 'sonarscanner4'
+        registry = 'my-registry-url'
+        registryCredentials = 'my-registry-credentials'
+        NEXUS_VERSION = '3'
+        NEXUS_PROTOCOL = 'https'
+        NEXUS_URL = 'http://nexus.example.com'
+        NEXUS_REPOSITORY = 'my-repo'
+        NEXUS_CREDENTIAL_ID = 'my-nexus-credentials'
+        ARTVERSION = '1.0'
+    }
+
+    stages {
+        stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonar-pro') {
                     sh '''${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=vprofile \
-                   -Dsonar.projectName=vprofile-repo \
-                   -Dsonar.projectVersion=1.0 \
-                   -Dsonar.sources=src/ \
-                   -Dsonar.java.binaries=target/test-classes/com/visualpathit/account/controllerTest/ \
-                   -Dsonar.junit.reportsPath=target/surefire-reports/ \
-                   -Dsonar.jacoco.reportsPath=target/jacoco.exec \
-                   -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml'''
+                       -Dsonar.projectName=vprofile-repo \
+                       -Dsonar.projectVersion=1.0 \
+                       -Dsonar.sources=src/ \
+                       -Dsonar.java.binaries=target/classes/ \
+                       -Dsonar.junit.reportsPath=target/surefire-reports/ \
+                       -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+                       -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml'''
                 }
 
                 timeout(time: 10, unit: 'MINUTES') {
@@ -77,70 +92,72 @@ pipeline {
         stage("Publish to Nexus Repository Manager") {
             steps {
                 script {
-                    pom = readMavenPom file: "pom.xml";
-                    filesByGlob = findFiles(glob: "target/*.${pom.packaging}");
-                    echo "${filesByGlob[0].name} ${filesByGlob[0].path} ${filesByGlob[0].directory} ${filesByGlob[0].length} ${filesByGlob[0].lastModified}"
-                    artifactPath = filesByGlob[0].path;
-                    artifactExists = fileExists artifactPath;
-                    if(artifactExists) {
-                        echo "*** File: ${artifactPath}, group: ${pom.groupId}, packaging: ${pom.packaging}, version ${pom.version} ARTVERSION";
+                    def pom = readMavenPom file: "pom.xml"
+                    def filesByGlob = findFiles(glob: "target/*.${pom.packaging}")
+                    echo "${filesByGlob[0].name} ${filesByGlob[0].path} ${filesByGlob[0].directory} ${filesByGlob[0].length} ${filesByGlob[0].lastModified()}"
+                    def artifactPath = filesByGlob[0].path
+                    def artifactExists = fileExists artifactPath
+                    if (artifactExists) {
+                        echo "*** File: ${artifactPath}, group: ${pom.groupId}, packaging: ${pom.packaging}, version ${pom.version} ARTVERSION"
                         nexusArtifactUploader(
-                                nexusVersion: NEXUS_VERSION,
-                                protocol: NEXUS_PROTOCOL,
-                                nexusUrl: NEXUS_URL,
-                                groupId: pom.groupId,
-                                version: ARTVERSION,
-                                repository: NEXUS_REPOSITORY,
-                                credentialsId: NEXUS_CREDENTIAL_ID,
-                                artifacts: [
-                                        [artifactId: pom.artifactId,
-                                         classifier: '',
-                                         file: artifactPath,
-                                         type: pom.packaging],
-                                        [artifactId: pom.artifactId,
-                                         classifier: '',
-                                         file: "pom.xml",
-                                         type: "pom"]
-                                ]
-                        );
-                    }
-                    else {
-                        error "*** File: ${artifactPath}, could not be found";
+                            nexusVersion: NEXUS_VERSION,
+                            protocol: NEXUS_PROTOCOL,
+                            nexusUrl: NEXUS_URL,
+                            groupId: pom.groupId,
+                            version: ARTVERSION,
+                            repository: NEXUS_REPOSITORY,
+                            credentialsId: NEXUS_CREDENTIAL_ID,
+                            artifacts: [
+                                [artifactId: pom.artifactId,
+                                 classifier: '',
+                                 file: artifactPath,
+                                 type: pom.packaging],
+                                [artifactId: pom.artifactId,
+                                 classifier: '',
+                                 file: "pom.xml",
+                                 type: "pom"]
+                            ]
+                        )
+                    } else {
+                        error "*** File: ${artifactPath}, could not be found"
                     }
                 }
             }
         }
-        stage('Build App Image'){
+
+        stage('Build App Image') {
             steps {
-                script{
-                    dockerImage = docker.build.registry + ":$BUILD_NUMBER"
+                script {
+                    def dockerImage = "${registry}:$BUILD_NUMBER"
+                    docker.build(dockerImage)
                 }
             }
         }
-        
-        stage('Upload Image'){
+
+        stage('Upload Image') {
             steps {
                 script {
                     docker.withRegistry('', registryCredentials) {
-                        docker.Image.push("V$Build_NUMBER")
-                        docker.Image.push('latest')
+                        docker.image("${registry}:$BUILD_NUMBER").push("V$BUILD_NUMBER")
+                        docker.image("${registry}:$BUILD_NUMBER").push('latest')
                     }
                 }
             }
         }
-        stage('Remove Unused Docker image') {
-            steps{
-                sh 'docker rmi $registry:V$BUILD_NUMBER'
+
+        stage('Remove Unused Docker Image') {
+            steps {
+                script {
+                    sh "docker rmi ${registry}:V$BUILD_NUMBER"
+                }
             }
         }
 
-        stage('Kubernetes Deploy')
-            agent {label 'KOPS'}
-                steps {
-                    sh 'helm upgrade --install --force vprofile-stack helm/vprofilecharts --set appimage=${registry}:V${BUILD_NUMBER} --namespace prod'
-
-                }
+        stage('Kubernetes Deploy') {
+            agent { label 'KOPS' }
+            steps {
+                sh "helm upgrade --install --force vprofile-stack helm/vprofilecharts --set appimage=${registry}:V${BUILD_NUMBER} --namespace prod"
+            }
+        }
     }
-
-
 }
